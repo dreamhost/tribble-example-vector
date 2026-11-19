@@ -1,4 +1,4 @@
-# vector-tribble
+# tribble-example-vector
 
 [Vector](https://vector.dev) as an event gateway on [tribble](https://www.dreamhost.com): it
 takes events over HTTP, shapes them, and writes them to Postgres.
