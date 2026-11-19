@@ -1,0 +1,4 @@
+{
+  "port": 8080,
+  "health": {"type": "tcp", "start_period_secs": 60}
+}

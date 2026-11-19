@@ -1,0 +1,111 @@
+# Two pipelines in one Vector, with Kafka between them:
+#
+#   in:   POST /sensors/<app>  ->  shape  ->  Kafka topic `events`
+#   out:  Kafka topic `events` ->  row    ->  Postgres table `events`
+#
+# Kafka in the middle means accepting an event does not depend on the database being up, and
+# the topic is a week of events that can be read again by something else.
+
+sources:
+  ingest:
+    type: http_server
+    address: 0.0.0.0:8080
+    # Everything under /sensors; the rest of the path is the producer's name.
+    path: /sensors
+    strict_path: false
+    path_key: path
+    method: POST
+    decoding:
+      codec: json
+    # This endpoint has a public address, and whatever can post an event can start a process.
+    auth:
+      strategy: basic
+      username: "${INGEST_USERNAME}"
+      password: "${INGEST_PASSWORD}"
+
+  log:
+    type: kafka
+    bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS}"
+    group_id: vector-events-to-postgres
+    topics: [events]
+    auto_offset_reset: earliest
+    decoding:
+      codec: json
+
+transforms:
+  # {"payload": {"event_name": ..., "user_id": ..., ...}}  ->  one row of the `events` table.
+  shape:
+    type: remap
+    inputs: [ingest]
+    drop_on_abort: true
+    drop_on_error: true
+    source: |
+      app = replace(string(.path) ?? "", r'^/sensors/?', "")
+      body = object(.payload) ?? {}
+      name = string(body.event_name) ?? ""
+      user_id = string(body.user_id) ?? ""
+      if app == "" || contains(app, "/") || name == "" || user_id == "" {
+        log("dropped an event: it needs /sensors/<app>, payload.event_name and payload.user_id", level: "error")
+        abort
+      }
+
+      # Event time is the producer's to state, in seconds; now, if it did not.
+      seconds = to_unix_timestamp(now())
+      if body.timestamp != null {
+        seconds = to_int(body.timestamp) ?? seconds
+      }
+      id = string(body.id) ?? uuid_v4()
+
+      message = body
+      del(message.event_name)
+      message.id = id
+      message.name = name
+      message.timestamp = seconds
+
+      . = {
+        "id": id,
+        "name": name,
+        "app": app,
+        "user_id": user_id,
+        "event_class": "raw",
+        "occurred_at": from_unix_timestamp!(seconds),
+        "ingested_at": now(),
+        "message": message
+      }
+
+  # Off Kafka the event is already the row; only the fields the Kafka source adds come off.
+  row:
+    type: remap
+    inputs: [log]
+    source: |
+      del(.topic)
+      del(.partition)
+      del(.offset)
+      del(.message_key)
+      del(.headers)
+      del(.timestamp)
+      del(.source_type)
+
+sinks:
+  to_kafka:
+    type: kafka
+    inputs: [shape]
+    bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS}"
+    topic: events
+    # One user's events stay in order.
+    key_field: user_id
+    encoding:
+      codec: json
+    # The HTTP source answers 200 only once Kafka has the event, so a producer that got a 200
+    # lost nothing.
+    acknowledgements:
+      enabled: true
+
+  to_postgres:
+    type: postgres
+    inputs: [row]
+    endpoint: "${DATABASE_URL}"
+    table: events
+    # The Kafka source commits an offset only once Postgres has the row.
+    acknowledgements:
+      enabled: true
