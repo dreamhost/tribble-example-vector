@@ -1,10 +1,8 @@
-# Two pipelines in one Vector, with Kafka between them:
+# One pipeline:
 #
-#   in:   POST /sensors/<app>  ->  shape  ->  Kafka topic `events`
-#   out:  Kafka topic `events` ->  row    ->  Postgres table `events`
+#   POST /sensors/<app>  ->  shape  ->  Postgres table `events`
 #
-# Kafka in the middle means accepting an event does not depend on the database being up, and
-# the topic is a week of events that can be read again by something else.
+# The first commit of this repository had Kafka between the two halves; `git log` has it.
 
 sources:
   ingest:
@@ -22,15 +20,6 @@ sources:
       strategy: basic
       username: "${INGEST_USERNAME}"
       password: "${INGEST_PASSWORD}"
-
-  log:
-    type: kafka
-    bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS}"
-    group_id: vector-events-to-postgres
-    topics: [events]
-    auto_offset_reset: earliest
-    decoding:
-      codec: json
 
 transforms:
   # {"payload": {"event_name": ..., "user_id": ..., ...}}  ->  one row of the `events` table.
@@ -73,39 +62,13 @@ transforms:
         "message": message
       }
 
-  # Off Kafka the event is already the row; only the fields the Kafka source adds come off.
-  row:
-    type: remap
-    inputs: [log]
-    source: |
-      del(.topic)
-      del(.partition)
-      del(.offset)
-      del(.message_key)
-      del(.headers)
-      del(.timestamp)
-      del(.source_type)
-
 sinks:
-  to_kafka:
-    type: kafka
-    inputs: [shape]
-    bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS}"
-    topic: events
-    # One user's events stay in order.
-    key_field: user_id
-    encoding:
-      codec: json
-    # The HTTP source answers 200 only once Kafka has the event, so a producer that got a 200
-    # lost nothing.
-    acknowledgements:
-      enabled: true
-
   to_postgres:
     type: postgres
-    inputs: [row]
+    inputs: [shape]
     endpoint: "${DATABASE_URL}"
     table: events
-    # The Kafka source commits an offset only once Postgres has the row.
+    # The HTTP source answers 200 only once Postgres has the row, so a producer that got a
+    # 200 lost nothing, and one that got an error knows to send again.
     acknowledgements:
       enabled: true
