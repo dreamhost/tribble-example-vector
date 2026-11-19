@@ -51,6 +51,9 @@ upsert, and one duplicate would fail its whole batch; readers de-duplicate inste
 
 - **The config is checked at build time** (`vector validate` in the `Dockerfile`), so a mistake
   in `vector.yaml` fails the build and the running app is left as it was.
+- **`${NAME}` in `vector.yaml` is turned on in the `Dockerfile`.** Vector disables environment
+  interpolation by default since 0.57; without it the config is read with the placeholders as
+  literal text.
 - **The health check is TCP** on 8080. The HTTP source has no health route.
 - **Stateless.** Nothing is kept on disk, so the app needs no volume, and it can run more than
   one replica.
